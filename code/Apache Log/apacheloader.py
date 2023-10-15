@@ -9,8 +9,7 @@ import hashlib
 import numpy as np
 
 
-log_format = r'(?P<Date>[^\s]+)\s+(?P<Day>[^\s]+)\s+(?P<Time>[^\s]+)\s+(?P<Component>[^\[]+)\[(?P<Pid>[^\]]+)\]:\s+(?P<Content>.*)'
-
+log_format = r'\[(?P<Time>[^\]]+)\] \[(?P<Level>[^\]]+)\] (?P<Content>.*)' #named groups Time(first squared brackets), Level(second squared brackets) and Content in formatted logs
 
 class LogLoader(object):
 
@@ -18,7 +17,9 @@ class LogLoader(object):
         self.logformat = logformat.strip()
 
     def load_to_dataframe(self, log_filepath):
-        """ Function to transform log file to dataframe 
+        """ 
+        Reads a log file from log_filepath and converts it to a DataFrame. 
+        The function also filters out lines that don't match the log format and calculates the success rate. 
         """
         print('Loading log messages to dataframe...')
         lines = []
@@ -30,31 +31,27 @@ class LogLoader(object):
             line = line.strip()
             if not line:
                 continue
-            line = re.sub(r'[^\x00-\x7F]+', '<N/ASCII>', line)
-            match = re.match(self.logformat, line)
+            line = re.sub(r'[^\x00-\x7F]+', '<N/ASCII>', line) # Remove non-ASCII characters
+            match = re.match(self.logformat, line) #match logformat with lines from file
             if match is None:
                 continue
-            log_message = {
-                'LineId': line_count + 1,
-                'Date': match.group('Date'),
-                'Day': match.group('Day'),
-                'Time': match.group('Time'),
-                'Component': match.group('Component'),
-                'Pid': match.group('Pid'),
-                'Content': match.group('Content')
-            }
-            log_messages.append(log_message)
+            message = [match.group(key) for key in ['Time', 'Level', 'Content']] #matched values in message
+            message.insert(0, line_count + 1) #insert LineId at beggining
+            log_messages.append(message)
 
         if not log_messages:
             raise RuntimeError('Logformat error or log file is empty!')
-        log_dataframe = pd.DataFrame(log_messages, columns=['LineId', 'Date', 'Day', 'Time', 'Component', 'Pid', 'Content'])
+        log_dataframe = pd.DataFrame(log_messages, columns=['LineId', 'Time', 'Level', 'Content'])
         success_rate = len(log_messages) / float(len(lines))
         print('Loading {} messages done, loading rate: {:.1%}'.format(len(log_messages), success_rate))
         return log_dataframe
 
-template_match_dict = defaultdict(dict)
+template_match_dict = defaultdict(dict) # A dictionary for storing the mapping between regular expressions and event templates.
 
 def read_template_from_csv(template_filepath):
+    """
+    Reads event templates from a CSV file, processes them, and stores them in template_match_dict.
+    """ 
     template_dataframe = pd.read_csv(template_filepath)
     #print(template_dataframe)
     for idx, row in template_dataframe.iterrows():
@@ -64,15 +61,21 @@ def read_template_from_csv(template_filepath):
     return template_dataframe
 
 def add_event_template(event_template, event_Id=None):
+    """
+    Adds an event template and its associated event ID to template_match_dict.
+    """
     if not event_Id:
         event_Id = generate_hash_eventId(event_template)
     template_match_dict[generate_template_regex(event_template)] = (event_Id, event_template)
 
 def generate_hash_eventId(template_str):
+    """Generates an 8-character hash for an event template string"""
+    
     return hashlib.md5(template_str.encode('utf-8')).hexdigest()[0:8]
 
 
 def generate_template_regex(template):
+    """Converts an event template to a regular expression."""
     template = re.sub(r'(<\*>\s?){2,}', '<*>', template)
     regex = re.sub(r'([^A-Za-z0-9])', r'\\\1', template)
     regex = regex.replace('\<\*\>', '(.*?)')
@@ -82,6 +85,7 @@ def generate_template_regex(template):
     return regex
 
 def match_logs_with_templates(log_filepath, template_filepath, log_format):
+    """High-level function that coordinates the process of loading log files and matching them against event templates."""
     print('Processing log file: {}'.format(log_filepath))
     start_time = datetime.now()
     loader = LogLoader(log_format)
@@ -98,6 +102,8 @@ def match_logs_with_templates(log_filepath, template_filepath, log_format):
     return log_dataframe
 
 def match_event(event_list, template_match_dict):
+
+    """Applies regular expression matching to each line of the logs."""
     match_list = []
     paras = []
     results = match_fn(event_list, template_match_dict)
@@ -107,6 +113,8 @@ def match_event(event_list, template_match_dict):
     return match_list, paras
 
 def match_fn(event_list, template_match_dict):
+    """A wrapper function that applies regex_match to a list of log lines."""
+
     print("Matching {} lines.".format(len(event_list)))
     #print(event_list[0:7])
     print('\n')
@@ -115,8 +123,9 @@ def match_fn(event_list, template_match_dict):
                   for event_content in event_list]
     #print(match_list)
     return match_list
-
+    
 def regex_match(msg, template_match_dict):
+    """Matches a single log line against all templates and returns the ID of the matching template and a list of parameters."""
     matched_event = None
     template_freq_dict = Counter()
     parameter_list = []
@@ -127,7 +136,7 @@ def regex_match(msg, template_match_dict):
         last_pos = 0
         for match in re.finditer(r'<\*>', template):
             regex_pattern += re.escape(template[last_pos:match.start()])
-            regex_pattern += r'(.+?)'
+            regex_pattern += r'(.*)'
             last_pos = match.end()
         regex_pattern += re.escape(template[last_pos:])
         
@@ -137,65 +146,36 @@ def regex_match(msg, template_match_dict):
             parameter_list = list(matches[0]) if matches else []
             break
 
-    if matched_event == 'E9':
-        regex_pattern = 'Failed password for invalid user (\w+) from (\d+\.\d+\.\d+\.\d+) port (\d+) (\w+)'
-        if re.match(regex_pattern, msg.strip()):
-            matched_event = 'E10'
-            matches = re.findall(regex_pattern, msg.strip())
-            parameter_list = list(matches[0]) if matches else []
-
-    
-  
-    if matched_event == 'E19' or matched_event == 'E20':
-        regex_pattern = 'pam_unix\(sshd:auth\): authentication failure; logname= uid=.* euid=.* tty=ssh ruser= rhost=.* user=.*'
-        if re.match(regex_pattern, msg.strip()):
-            matched_event = 'E20'
-            parameter_list = []
-
-
-
     if not matched_event:
         matched_event = 'NONE'
     if not parameter_list:
-        parameter_list = ['NONE'] * (regex_pattern.count('(.+?)'))
+        parameter_list = ['NONE'] * (regex_pattern.count('(.*)'))
 
     return matched_event, parameter_list
 
 
 
 
-
-
 log_loader = LogLoader(log_format)
-log_dataframe = log_loader.load_to_dataframe('ssh_formatted_logs.log')
-#print(log_dataframe.head())
-structured_dataframe = pd.read_csv('OpenSSH_2k.log_structured_rev.csv')
-#print(structured_dataframe)
+log_dataframe = log_loader.load_to_dataframe('apache_formatted_logs.log')
+print(log_dataframe.head())
+print("\n\n")
+structured_dataframe = pd.read_csv('Apache_2k.log_structured.csv')
+print(structured_dataframe)
+print("\n\n")
 #x = read_template_from_csv('Apache_2k.log_templates.csv')
 #print (x)
 #y = match('Apache_2k.log', 'Apache_2k.log_templates.csv')
 #print(y)
-matched_logs = match_logs_with_templates('ssh_formatted_logs.log', 'OpenSSH_2k.log_templates_rev.csv', log_format)
+matched_logs =match_logs_with_templates('apache_formatted_logs.log', 'Apache_2k.log_templates.csv', log_format)
 print(matched_logs)
+print("\n\n")
  # merge the two dataframes on line_id and Event_Id columns
-merged_logs = matched_logs.merge(structured_dataframe, on=['LineId', 'EventId'], how='inner',indicator=True)
+merged_logs = matched_logs.merge(structured_dataframe, on=['LineId', 'EventId'], how='inner')
 print(merged_logs)
 # count the number of rows in the merged dataframe
-
 count = merged_logs.shape[0]
 
-print(count)
 # print the count
-print(f'{(count/2000) *100}% logs are parsed correctly.') 
+print(f'{(count/2000) *100}% logs are parsed correctly.')
 
-# perform a left join on the two dataframes based on LineId
-'''merged_logs = matched_logs.merge(structured_dataframe, on='LineId', how='left')
-
-# filter the merged dataframe to only keep rows where the EventId_x and EventId_y are not equal
-mismatched_logs = merged_logs[merged_logs['EventId_x'] != merged_logs['EventId_y']]
-print(mismatched_logs[['LineId','EventId_x']])
-# count the number of rows in the filtered dataframe
-count = mismatched_logs.shape[0]
-
-# print the count
-print(count)'''
